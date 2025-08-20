@@ -24,7 +24,8 @@ SCRIPT_NAME="upf"
 
 # Check if we have access to terminal for interactive input
 INTERACTIVE=true
-if ! [ -t 0 ] && ! [ -e /dev/tty ]; then
+# Simply check if /dev/tty exists and is readable
+if ! [ -r /dev/tty ]; then
     INTERACTIVE=false
 fi
 
@@ -60,17 +61,20 @@ read_user_input() {
     local default="${2:-n}"
     local response=""
     
+    # Always show the prompt on stderr (which usually goes to terminal)
+    echo -e -n "$prompt" >&2
+    
     if [[ "$INTERACTIVE" == "true" ]]; then
-        if [ -e /dev/tty ]; then
-            # When piped, write prompt to /dev/tty so user can see it
-            echo -n "$prompt" >/dev/tty
-            read -r response </dev/tty
+        # Try to read from /dev/tty if available
+        if [ -r /dev/tty ]; then
+            read -r response </dev/tty 2>/dev/null || response="$default"
         else
-            echo -n "$prompt"
-            read -r response
+            # Fallback to reading from stdin
+            read -r response || response="$default"
         fi
     else
-        print_warning "Non-interactive mode detected, using default: $default"
+        # Non-interactive mode
+        echo " (non-interactive, using default: $default)" >&2
         response="$default"
     fi
     
