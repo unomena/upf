@@ -1,0 +1,457 @@
+#!/bin/bash
+
+# UPF - Uncomplicated Port Forwarding
+# A simple wrapper for managing port forwarding rules using iptables
+# 
+# Author: Your Name
+# License: MIT
+# Repository: https://github.com/unomena/upf
+#
+# This script simplifies the management of iptables port forwarding rules
+# by providing an easy-to-use interface similar to UFW (Uncomplicated Firewall).
+# It automatically handles iptables rule creation, persistence, and IP forwarding.
+
+# Configuration file to store rules
+# All rules are persisted in a simple format: local_port:dest_ip:dest_port
+CONFIG_DIR="/etc/upf"
+CONFIG_FILE="$CONFIG_DIR/rules.conf"
+# Prefix for iptables rule comments to identify UPF-managed rules
+IPTABLES_COMMENT_PREFIX="UPF"
+
+# Colors for output
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+NC='\033[0m' # No Color
+
+# Ensure running as root
+# Port forwarding requires root privileges to modify iptables rules
+check_root() {
+    if [[ $EUID -ne 0 ]]; then
+        echo -e "${RED}Error: This script must be run as root (use sudo)${NC}"
+        exit 1
+    fi
+}
+
+# Initialize configuration
+# Creates the configuration directory and file if they don't exist
+init_config() {
+    if [[ ! -d "$CONFIG_DIR" ]]; then
+        mkdir -p "$CONFIG_DIR"
+    fi
+    if [[ ! -f "$CONFIG_FILE" ]]; then
+        touch "$CONFIG_FILE"
+    fi
+}
+
+# Enable IP forwarding
+# Required for the kernel to forward packets between network interfaces
+# Makes the setting persistent by adding it to /etc/sysctl.conf
+enable_ip_forwarding() {
+    local current_forwarding=$(sysctl -n net.ipv4.ip_forward 2>/dev/null)
+    if [[ "$current_forwarding" != "1" ]]; then
+        echo -e "${YELLOW}Enabling IP forwarding...${NC}"
+        sysctl -w net.ipv4.ip_forward=1 >/dev/null 2>&1
+        # Make it persistent
+        if ! grep -q "^net.ipv4.ip_forward=1" /etc/sysctl.conf 2>/dev/null; then
+            echo "net.ipv4.ip_forward=1" >> /etc/sysctl.conf
+        fi
+    fi
+}
+
+# Parse destination (handle localhost, 127.0.0.1, 0.0.0.0, etc.)
+# Provides convenient shortcuts for common IP addresses
+# Returns the actual IP address to use in iptables rules
+parse_destination() {
+    local dest="$1"
+    case "$dest" in
+        localhost|home|127*|lo)
+            echo "127.0.0.1"
+            ;;
+        0.0.0.0|0|000)
+            echo "0.0.0.0"
+            ;;
+        *)
+            echo "$dest"
+            ;;
+    esac
+}
+
+# List all port forwarding rules
+# Displays all configured rules and their current status in iptables
+# Shows Active (rule exists in iptables) or Inactive (rule missing)
+# Supports --json flag for machine-readable output
+list_rules() {
+    local json_output=false
+    
+    # Check for --json flag
+    if [[ "$1" == "--json" ]]; then
+        json_output=true
+    fi
+    
+    if [[ "$json_output" == true ]]; then
+        # JSON output mode
+        echo "{"
+        echo '  "rules": ['
+        
+        if [[ -s "$CONFIG_FILE" ]]; then
+            local first=true
+            while IFS=: read -r local_port dest_ip dest_port; do
+                # Check if the iptables rules actually exist
+                if iptables -t nat -C PREROUTING -p tcp --dport "$local_port" \
+                   -j DNAT --to-destination "${dest_ip}:${dest_port}" \
+                   -m comment --comment "${IPTABLES_COMMENT_PREFIX}_${local_port}" 2>/dev/null; then
+                    local status="active"
+                else
+                    local status="inactive"
+                fi
+                
+                # Add comma for all but first entry
+                if [[ "$first" == true ]]; then
+                    first=false
+                else
+                    echo ","
+                fi
+                
+                # Output JSON object for this rule
+                printf '    {\n'
+                printf '      "local_port": %s,\n' "$local_port"
+                printf '      "destination_ip": "%s",\n' "$dest_ip"
+                printf '      "destination_port": %s,\n' "$dest_port"
+                printf '      "status": "%s"\n' "$status"
+                printf '    }'
+            done < "$CONFIG_FILE"
+            echo ""  # New line after last entry
+        fi
+        
+        echo "  ]"
+        echo "}"
+    else
+        # Traditional human-readable output
+        echo -e "${GREEN}Active UPF Port Forwarding Rules:${NC}"
+        echo "=================================="
+        
+        if [[ ! -s "$CONFIG_FILE" ]]; then
+            echo "No port forwarding rules configured."
+            return
+        fi
+        
+        printf "%-15s %-30s %-10s\n" "LOCAL PORT" "DESTINATION" "STATUS"
+        printf "%-15s %-30s %-10s\n" "----------" "-----------" "------"
+        
+        while IFS=: read -r local_port dest_ip dest_port; do
+            # Check if the iptables rules actually exist
+            # -C flag checks for rule existence without modifying
+            if iptables -t nat -C PREROUTING -p tcp --dport "$local_port" \
+               -j DNAT --to-destination "${dest_ip}:${dest_port}" \
+               -m comment --comment "${IPTABLES_COMMENT_PREFIX}_${local_port}" 2>/dev/null; then
+                status="${GREEN}Active${NC}"
+            else
+                status="${RED}Inactive${NC}"
+            fi
+            printf "%-15s %-30s %b\n" "$local_port" "${dest_ip}:${dest_port}" "$status"
+        done < "$CONFIG_FILE"
+    fi
+}
+
+# Add a port forwarding rule
+# Creates iptables rules to forward traffic from a local port to a destination
+# Handles both external traffic (PREROUTING) and local traffic (OUTPUT)
+add_rule() {
+    local from_port="$1"
+    local to_spec="$2"
+    
+    # Validate that we have both parameters
+    if [[ -z "$from_port" || -z "$to_spec" ]]; then
+        echo -e "${RED}Error: Missing parameters${NC}"
+        echo "Usage: upf add <from_port> <destination>"
+        echo "Examples:"
+        echo "  upf add 8080 192.168.1.30:80  # Forward port 8080 to 192.168.1.30:80"
+        echo "  upf add 8080 80                # Forward port 8080 to localhost:80"
+        exit 1
+    fi
+    
+    # Validate from_port is a number
+    if ! [[ "$from_port" =~ ^[0-9]+$ ]]; then
+        echo -e "${RED}Error: From port must be a number${NC}"
+        exit 1
+    fi
+    
+    # Parse destination
+    # Supports two formats:
+    #   1. IP:port (e.g., 192.168.1.100:80)
+    #   2. port only (assumes localhost, e.g., 80)
+    local dest_ip
+    local dest_port
+    
+    # Check if to_spec contains a colon (IP:port format)
+    if [[ "$to_spec" == *:* ]]; then
+        # Split IP and port
+        dest_ip="${to_spec%:*}"
+        dest_port="${to_spec#*:}"
+        dest_ip=$(parse_destination "$dest_ip")
+    else
+        # Just a port number, assume localhost
+        dest_ip="127.0.0.1"
+        dest_port="$to_spec"
+    fi
+    
+    # Validate dest_port is a number
+    if ! [[ "$dest_port" =~ ^[0-9]+$ ]]; then
+        echo -e "${RED}Error: Destination port must be a number${NC}"
+        exit 1
+    fi
+    
+    # Check if rule already exists
+    if grep -q "^${from_port}:" "$CONFIG_FILE" 2>/dev/null; then
+        echo -e "${YELLOW}Warning: Rule for port $from_port already exists${NC}"
+        echo -n "Do you want to replace it? (y/n): "
+        read -r response
+        if [[ "$response" != "y" ]]; then
+            exit 0
+        fi
+        remove_rule "$from_port" silent
+    fi
+    
+    # Enable IP forwarding
+    enable_ip_forwarding
+    
+    # Add iptables rules
+    echo -e "${GREEN}Adding port forwarding rule: localhost:$from_port -> ${dest_ip}:${dest_port}${NC}"
+    
+    # Add PREROUTING rule for DNAT
+    # This handles traffic coming from external sources
+    iptables -t nat -A PREROUTING -p tcp --dport "$from_port" \
+        -j DNAT --to-destination "${dest_ip}:${dest_port}" \
+        -m comment --comment "${IPTABLES_COMMENT_PREFIX}_${from_port}"
+    
+    # Add FORWARD rule to allow the forwarded traffic
+    # Required to permit packets to traverse the system
+    iptables -A FORWARD -p tcp --dport "$dest_port" -d "$dest_ip" \
+        -m state --state NEW,ESTABLISHED,RELATED -j ACCEPT \
+        -m comment --comment "${IPTABLES_COMMENT_PREFIX}_${from_port}"
+    
+    # If destination is localhost, add OUTPUT rule
+    # OUTPUT chain is needed for locally-generated traffic to localhost
+    if [[ "$dest_ip" == "127.0.0.1" ]]; then
+        iptables -t nat -A OUTPUT -p tcp --dport "$from_port" \
+            -j DNAT --to-destination "${dest_ip}:${dest_port}" \
+            -m comment --comment "${IPTABLES_COMMENT_PREFIX}_${from_port}"
+    fi
+    
+    # Save to config file
+    echo "${from_port}:${dest_ip}:${dest_port}" >> "$CONFIG_FILE"
+    
+    echo -e "${GREEN}✓ Port forwarding rule added successfully${NC}"
+}
+
+# Remove a port forwarding rule
+# Removes all iptables rules associated with a specific port
+# Also removes the rule from the configuration file
+remove_rule() {
+    local local_port="$1"
+    local silent="$2"
+    
+    if ! grep -q "^${local_port}:" "$CONFIG_FILE" 2>/dev/null; then
+        if [[ "$silent" != "silent" ]]; then
+            echo -e "${RED}Error: No rule found for port $local_port${NC}"
+        fi
+        return 1
+    fi
+    
+    # Get the full rule details
+    IFS=: read -r port dest_ip dest_port <<< "$(grep "^${local_port}:" "$CONFIG_FILE")"
+    
+    if [[ "$silent" != "silent" ]]; then
+        echo -e "${YELLOW}Removing port forwarding rule for port $local_port${NC}"
+    fi
+    
+    # Remove iptables rules (ignore errors if rules don't exist)
+    # -D flag deletes the matching rule from the chain
+    iptables -t nat -D PREROUTING -p tcp --dport "$local_port" \
+        -j DNAT --to-destination "${dest_ip}:${dest_port}" \
+        -m comment --comment "${IPTABLES_COMMENT_PREFIX}_${local_port}" 2>/dev/null
+    
+    iptables -D FORWARD -p tcp --dport "$dest_port" -d "$dest_ip" \
+        -m state --state NEW,ESTABLISHED,RELATED -j ACCEPT \
+        -m comment --comment "${IPTABLES_COMMENT_PREFIX}_${local_port}" 2>/dev/null
+    
+    # Remove OUTPUT rule if destination was localhost
+    if [[ "$dest_ip" == "127.0.0.1" ]]; then
+        iptables -t nat -D OUTPUT -p tcp --dport "$local_port" \
+            -j DNAT --to-destination "${dest_ip}:${dest_port}" \
+            -m comment --comment "${IPTABLES_COMMENT_PREFIX}_${local_port}" 2>/dev/null
+    fi
+    
+    # Remove from config file
+    sed -i "/^${local_port}:/d" "$CONFIG_FILE"
+    
+    if [[ "$silent" != "silent" ]]; then
+        echo -e "${GREEN}✓ Port forwarding rule removed${NC}"
+    fi
+}
+
+# Apply all rules from config (useful after reboot)
+# Restores all saved rules from the configuration file
+# Checks if rules already exist to avoid duplicates
+apply_all_rules() {
+    echo -e "${GREEN}Applying all saved UPF rules...${NC}"
+    enable_ip_forwarding
+    
+    while IFS=: read -r local_port dest_ip dest_port; do
+        # Check if rule already exists in iptables
+        if ! iptables -t nat -C PREROUTING -p tcp --dport "$local_port" \
+           -j DNAT --to-destination "${dest_ip}:${dest_port}" \
+           -m comment --comment "${IPTABLES_COMMENT_PREFIX}_${local_port}" 2>/dev/null; then
+            
+            # Re-add the rule
+            iptables -t nat -A PREROUTING -p tcp --dport "$local_port" \
+                -j DNAT --to-destination "${dest_ip}:${dest_port}" \
+                -m comment --comment "${IPTABLES_COMMENT_PREFIX}_${local_port}"
+            
+            iptables -A FORWARD -p tcp --dport "$dest_port" -d "$dest_ip" \
+                -m state --state NEW,ESTABLISHED,RELATED -j ACCEPT \
+                -m comment --comment "${IPTABLES_COMMENT_PREFIX}_${local_port}"
+            
+            if [[ "$dest_ip" == "127.0.0.1" ]]; then
+                iptables -t nat -A OUTPUT -p tcp --dport "$local_port" \
+                    -j DNAT --to-destination "${dest_ip}:${dest_port}" \
+                    -m comment --comment "${IPTABLES_COMMENT_PREFIX}_${local_port}"
+            fi
+            
+            echo "  ✓ Applied rule: $local_port -> ${dest_ip}:${dest_port}"
+        fi
+    done < "$CONFIG_FILE"
+}
+
+# Clean all UPF rules
+# Removes ALL port forwarding rules managed by UPF
+# Identifies rules by their comment tags and removes them safely
+clean_all_rules() {
+    echo -e "${YELLOW}Removing all UPF rules...${NC}"
+    
+    # Remove all UPF-tagged iptables rules
+    # Uses iptables-save to list all rules, filters for UPF comments
+    iptables-save | grep -E "${IPTABLES_COMMENT_PREFIX}_[0-9]+" | while read -r line; do
+        # Extract the rule and table
+        if [[ "$line" =~ ^-A ]]; then
+            table=""
+            if [[ "$line" =~ nat ]]; then
+                table="-t nat"
+            fi
+            # Convert -A to -D to delete the rule
+            delete_rule=$(echo "$line" | sed 's/^-A /-D /')
+            iptables $table $delete_rule 2>/dev/null
+        fi
+    done
+    
+    # Clear config file
+    > "$CONFIG_FILE"
+    echo -e "${GREEN}✓ All UPF rules removed${NC}"
+}
+
+# Display help
+show_help() {
+    echo "UPF - Uncomplicated Port Forwarding"
+    echo "======================================"
+    echo "A simple tool for managing iptables port forwarding rules"
+    echo ""
+    echo "USAGE:"
+    echo "  upf <command> [arguments]"
+    echo ""
+    echo "COMMANDS:"
+    echo "  list, ls [--json]             List all port forwarding rules and their status"
+    echo "  add <from_port> <to>          Add a new port forwarding rule"
+    echo "  rm, remove <port>             Remove a port forwarding rule"
+    echo "  apply                         Apply all saved rules (useful after reboot)"
+    echo "  clean                         Remove ALL UPF-managed rules"
+    echo "  help, -h, --help             Show this help message"
+    echo ""
+    echo "EXAMPLES:"
+    echo "  # Forward external port 8080 to internal server on port 80"
+    echo "  sudo upf add 8080 192.168.1.30:80"
+    echo ""
+    echo "  # Forward port 8080 to local port 80 (same machine)"
+    echo "  sudo upf add 8080 80"
+    echo ""
+    echo "  # Forward HTTPS traffic to internal server"
+    echo "  sudo upf add 443 10.0.0.5:443"
+    echo ""
+    echo "  # Local port redirection (e.g., for development)"
+    echo "  sudo upf add 3000 3001"
+    echo ""
+    echo "  # List all active rules"
+    echo "  sudo upf list"
+    echo ""
+    echo "  # List rules in JSON format (for scripts/automation)"
+    echo "  sudo upf list --json"
+    echo ""
+    echo "  # Remove a specific rule"
+    echo "  sudo upf rm 8080"
+    echo ""
+    echo "  # Restore rules after system restart"
+    echo "  sudo upf apply"
+    echo ""
+    echo "DESTINATION FORMATS:"
+    echo "  <ip>:<port>                   Forward to specific IP and port"
+    echo "  <port>                        Forward to localhost on specified port"
+    echo ""
+    echo "SPECIAL IP SHORTCUTS:"
+    echo "  localhost, home, 127*, lo     Resolves to 127.0.0.1"
+    echo "  0.0.0.0, 0, 000               Resolves to 0.0.0.0 (all interfaces)"
+    echo ""
+    echo "NOTES:"
+    echo "  - All commands require root privileges (use sudo)"
+    echo "  - Rules are automatically saved to /etc/upf/rules.conf"
+    echo "  - IP forwarding is enabled automatically when adding rules"
+    echo "  - Use 'upf apply' after system restart to restore all rules"
+    echo ""
+    echo "For more information, visit: https://github.com/yourusername/upf"
+}
+
+# Main script logic
+check_root
+init_config
+
+case "$1" in
+    list|ls)
+        list_rules "$2"
+        ;;
+    add)
+        if [[ -z "$2" || -z "$3" ]]; then
+            echo -e "${RED}Error: Missing arguments${NC}"
+            echo "Usage: upf add <from_port> <destination>"
+            echo "Examples:"
+            echo "  upf add 8080 192.168.1.30:80"
+            echo "  upf add 8080 80"
+            exit 1
+        fi
+        add_rule "$2" "$3"
+        ;;
+    rm|remove)
+        if [[ -z "$2" ]]; then
+            echo -e "${RED}Error: Missing port number${NC}"
+            show_help
+            exit 1
+        fi
+        remove_rule "$2"
+        ;;
+    apply)
+        apply_all_rules
+        ;;
+    clean)
+        clean_all_rules
+        ;;
+    help|-h|--help)
+        show_help
+        ;;
+    *)
+        if [[ -z "$1" ]]; then
+            list_rules
+        else
+            echo -e "${RED}Error: Unknown command '$1'${NC}"
+            show_help
+            exit 1
+        fi
+        ;;
+esac
