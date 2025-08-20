@@ -78,6 +78,119 @@ parse_destination() {
     esac
 }
 
+# Resolve hostname to IP address
+# Tries multiple methods to resolve a hostname
+resolve_hostname() {
+    local hostname="$1"
+    local resolved_ip=""
+    
+    # First check if it's already an IP address
+    if [[ "$hostname" =~ ^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$ ]]; then
+        echo "$hostname"
+        return 0
+    fi
+    
+    # Try getent first (checks /etc/hosts and DNS)
+    if command -v getent &> /dev/null; then
+        resolved_ip=$(getent hosts "$hostname" 2>/dev/null | awk '{print $1}' | head -n1)
+        if [[ -n "$resolved_ip" ]]; then
+            echo "$resolved_ip"
+            return 0
+        fi
+    fi
+    
+    # Try host command (DNS only)
+    if command -v host &> /dev/null; then
+        resolved_ip=$(host "$hostname" 2>/dev/null | grep "has address" | awk '{print $4}' | head -n1)
+        if [[ -n "$resolved_ip" ]]; then
+            echo "$resolved_ip"
+            return 0
+        fi
+    fi
+    
+    # Try nslookup (DNS only)
+    if command -v nslookup &> /dev/null; then
+        resolved_ip=$(nslookup "$hostname" 2>/dev/null | grep "^Address: " | grep -v "#" | awk '{print $2}' | head -n1)
+        if [[ -n "$resolved_ip" ]]; then
+            echo "$resolved_ip"
+            return 0
+        fi
+    fi
+    
+    # Try dig (DNS only)
+    if command -v dig &> /dev/null; then
+        resolved_ip=$(dig +short "$hostname" 2>/dev/null | grep -E '^[0-9.]+$' | head -n1)
+        if [[ -n "$resolved_ip" ]]; then
+            echo "$resolved_ip"
+            return 0
+        fi
+    fi
+    
+    # Try checking /etc/hosts directly as last resort
+    if [[ -f /etc/hosts ]]; then
+        resolved_ip=$(grep -E "^[^#]*\s+$hostname(\s|$)" /etc/hosts 2>/dev/null | awk '{print $1}' | head -n1)
+        if [[ -n "$resolved_ip" ]]; then
+            echo "$resolved_ip"
+            return 0
+        fi
+    fi
+    
+    # Could not resolve
+    return 1
+}
+
+# Reverse resolve IP to hostname
+# Tries to find a hostname for an IP address
+reverse_resolve_ip() {
+    local ip="$1"
+    local hostname=""
+    
+    # Skip localhost IPs
+    if [[ "$ip" == "127.0.0.1" ]] || [[ "$ip" == "::1" ]]; then
+        echo "localhost"
+        return 0
+    fi
+    
+    # Try getent first (checks /etc/hosts and DNS)
+    if command -v getent &> /dev/null; then
+        hostname=$(getent hosts "$ip" 2>/dev/null | awk '{print $2}' | head -n1)
+        if [[ -n "$hostname" ]]; then
+            echo "$hostname"
+            return 0
+        fi
+    fi
+    
+    # Try host command for reverse DNS
+    if command -v host &> /dev/null; then
+        hostname=$(host "$ip" 2>/dev/null | grep "pointer" | awk '{print $NF}' | sed 's/\.$//' | head -n1)
+        if [[ -n "$hostname" ]]; then
+            echo "$hostname"
+            return 0
+        fi
+    fi
+    
+    # Try nslookup for reverse DNS
+    if command -v nslookup &> /dev/null; then
+        hostname=$(nslookup "$ip" 2>/dev/null | grep "name =" | awk '{print $NF}' | sed 's/\.$//' | head -n1)
+        if [[ -n "$hostname" ]]; then
+            echo "$hostname"
+            return 0
+        fi
+    fi
+    
+    # Try checking /etc/hosts directly
+    if [[ -f /etc/hosts ]]; then
+        hostname=$(grep -E "^$ip\s+" /etc/hosts 2>/dev/null | awk '{print $2}' | head -n1)
+        if [[ -n "$hostname" ]]; then
+            echo "$hostname"
+            return 0
+        fi
+    fi
+    
+    # Could not reverse resolve
+    return 1
+}
+
 # List all port forwarding rules
 # Displays all configured rules and their current status in iptables
 # Shows Active (rule exists in iptables) or Inactive (rule missing)
@@ -114,11 +227,20 @@ list_rules() {
                     echo ","
                 fi
                 
+                # Try to reverse resolve the IP to a hostname
+                hostname=""
+                if reverse_resolve_ip "$dest_ip" >/dev/null 2>&1; then
+                    hostname=$(reverse_resolve_ip "$dest_ip")
+                fi
+                
                 # Output JSON object for this rule
                 printf '    {\n'
                 printf '      "local_port": %s,\n' "$local_port"
                 printf '      "destination_ip": "%s",\n' "$dest_ip"
                 printf '      "destination_port": %s,\n' "$dest_port"
+                if [[ -n "$hostname" ]]; then
+                    printf '      "hostname": "%s",\n' "$hostname"
+                fi
                 printf '      "status": "%s"\n' "$status"
                 printf '    }'
             done < "$CONFIG_FILE"
@@ -137,8 +259,8 @@ list_rules() {
             return
         fi
         
-        printf "%-15s %-30s %-10s\n" "LOCAL PORT" "DESTINATION" "STATUS"
-        printf "%-15s %-30s %-10s\n" "----------" "-----------" "------"
+        printf "%-15s %-30s %-25s %-10s\n" "LOCAL PORT" "DESTINATION" "HOSTNAME" "STATUS"
+        printf "%-15s %-30s %-25s %-10s\n" "----------" "-----------" "--------" "------"
         
         while IFS=: read -r local_port dest_ip dest_port; do
             # Check if the iptables rules actually exist
@@ -150,7 +272,14 @@ list_rules() {
             else
                 status="${RED}Inactive${NC}"
             fi
-            printf "%-15s %-30s %b\n" "$local_port" "${dest_ip}:${dest_port}" "$status"
+            
+            # Try to reverse resolve the IP to a hostname
+            hostname=""
+            if reverse_resolve_ip "$dest_ip" >/dev/null 2>&1; then
+                hostname=$(reverse_resolve_ip "$dest_ip")
+            fi
+            
+            printf "%-15s %-30s %-25s %b\n" "$local_port" "${dest_ip}:${dest_port}" "$hostname" "$status"
         done < "$CONFIG_FILE"
     fi
 }
@@ -180,17 +309,33 @@ add_rule() {
     
     # Parse destination
     # Supports two formats:
-    #   1. IP:port (e.g., 192.168.1.100:80)
+    #   1. IP/hostname:port (e.g., 192.168.1.100:80 or server.local:80)
     #   2. port only (assumes localhost, e.g., 80)
     local dest_ip
     local dest_port
+    local original_dest=""
     
-    # Check if to_spec contains a colon (IP:port format)
+    # Check if to_spec contains a colon (IP:port or hostname:port format)
     if [[ "$to_spec" == *:* ]]; then
-        # Split IP and port
-        dest_ip="${to_spec%:*}"
+        # Split IP/hostname and port
+        original_dest="${to_spec%:*}"
         dest_port="${to_spec#*:}"
-        dest_ip=$(parse_destination "$dest_ip")
+        
+        # First try parse_destination for shortcuts
+        dest_ip=$(parse_destination "$original_dest")
+        
+        # If parse_destination didn't change it, try hostname resolution
+        if [[ "$dest_ip" == "$original_dest" ]]; then
+            # Try to resolve hostname
+            if resolved_ip=$(resolve_hostname "$original_dest"); then
+                dest_ip="$resolved_ip"
+                echo -e "${GREEN}Resolved $original_dest to $dest_ip${NC}"
+            else
+                echo -e "${RED}Error: Cannot resolve hostname '$original_dest'${NC}"
+                echo "Please check the hostname or add it to /etc/hosts"
+                exit 1
+            fi
+        fi
     else
         # Just a port number, assume localhost
         dest_ip="127.0.0.1"
@@ -218,7 +363,11 @@ add_rule() {
     enable_ip_forwarding
     
     # Add iptables rules
-    echo -e "${GREEN}Adding port forwarding rule: localhost:$from_port -> ${dest_ip}:${dest_port}${NC}"
+    if [[ -n "$original_dest" ]] && [[ "$original_dest" != "$dest_ip" ]]; then
+        echo -e "${GREEN}Adding port forwarding rule: localhost:$from_port -> ${original_dest}:${dest_port} (${dest_ip}:${dest_port})${NC}"
+    else
+        echo -e "${GREEN}Adding port forwarding rule: localhost:$from_port -> ${dest_ip}:${dest_port}${NC}"
+    fi
     
     # Add PREROUTING rule for DNAT
     # This handles traffic coming from external sources
@@ -372,6 +521,10 @@ show_help() {
     echo "  # Forward external port 8080 to internal server on port 80"
     echo "  sudo upf add 8080 192.168.1.30:80"
     echo ""
+    echo "  # Forward port using hostname (resolved via DNS or /etc/hosts)"
+    echo "  sudo upf add 8080 webserver.local:80"
+    echo "  sudo upf add 8001 sample-django-minimal:8000"
+    echo ""
     echo "  # Forward port 8080 to local port 80 (same machine)"
     echo "  sudo upf add 8080 80"
     echo ""
@@ -395,6 +548,7 @@ show_help() {
     echo ""
     echo "DESTINATION FORMATS:"
     echo "  <ip>:<port>                   Forward to specific IP and port"
+    echo "  <hostname>:<port>             Forward to hostname (resolved via DNS/hosts)"
     echo "  <port>                        Forward to localhost on specified port"
     echo ""
     echo "SPECIAL IP SHORTCUTS:"
