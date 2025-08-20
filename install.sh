@@ -22,6 +22,12 @@ INSTALL_DIR="/usr/local/bin"
 CONFIG_DIR="/etc/upf"
 SCRIPT_NAME="upf"
 
+# Check if we have access to terminal for interactive input
+INTERACTIVE=true
+if ! [ -t 0 ] && ! [ -e /dev/tty ]; then
+    INTERACTIVE=false
+fi
+
 # Functions for colored output
 print_header() {
     echo -e "${BOLD}"
@@ -46,6 +52,32 @@ print_info() {
 
 print_warning() {
     echo -e "${YELLOW}⚠ $1${NC}"
+}
+
+# Read user input safely, even when piped
+read_user_input() {
+    local prompt="$1"
+    local default="${2:-n}"
+    local response=""
+    
+    if [[ "$INTERACTIVE" == "true" ]]; then
+        echo -n "$prompt"
+        if [ -e /dev/tty ]; then
+            read -r response </dev/tty
+        else
+            read -r response
+        fi
+    else
+        print_warning "Non-interactive mode detected, using default: $default"
+        response="$default"
+    fi
+    
+    # If empty response, use default
+    if [[ -z "$response" ]]; then
+        response="$default"
+    fi
+    
+    echo "$response"
 }
 
 # Check if running as root
@@ -170,8 +202,7 @@ setup_ip_forwarding() {
     
     if [[ "$current_forwarding" != "1" ]]; then
         print_warning "IP forwarding is currently disabled"
-        echo -n "  Enable IP forwarding? (recommended) [y/N]: "
-        read -r response
+        response=$(read_user_input "  Enable IP forwarding? (recommended) [y/N]: " "n")
         
         if [[ "$response" =~ ^[Yy]$ ]]; then
             # Enable immediately
@@ -195,8 +226,7 @@ setup_ip_forwarding() {
 apply_existing_rules() {
     if [[ -s "$CONFIG_DIR/rules.conf" ]]; then
         print_info "Found existing port forwarding rules"
-        echo -n "  Apply existing rules now? [y/N]: "
-        read -r response
+        response=$(read_user_input "  Apply existing rules now? [y/N]: " "n")
         
         if [[ "$response" =~ ^[Yy]$ ]]; then
             print_info "Applying existing rules..."
@@ -213,8 +243,7 @@ apply_existing_rules() {
 setup_systemd_service() {
     if command -v systemctl &> /dev/null; then
         print_info "Systemd detected"
-        echo -n "  Create systemd service for automatic rule application at boot? [y/N]: "
-        read -r response
+        response=$(read_user_input "  Create systemd service for automatic rule application at boot? [y/N]: " "n")
         
         if [[ "$response" =~ ^[Yy]$ ]]; then
             cat > /etc/systemd/system/upf.service << 'EOF'
