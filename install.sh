@@ -23,12 +23,7 @@ CONFIG_DIR="/etc/upf"
 WRAPPER_SCRIPT="upf"
 CORE_SCRIPT="upf-core"
 
-# Check if we have access to terminal for interactive input
-INTERACTIVE=true
-# Simply check if /dev/tty exists and is readable
-if ! [ -r /dev/tty ]; then
-    INTERACTIVE=false
-fi
+# No longer need interactive mode detection since we don't prompt for input
 
 # Functions for colored output
 print_header() {
@@ -56,36 +51,7 @@ print_warning() {
     echo -e "${YELLOW}⚠ $1${NC}"
 }
 
-# Read user input safely, even when piped
-read_user_input() {
-    local prompt="$1"
-    local default="${2:-n}"
-    local response=""
-    
-    # Always show the prompt on stderr (which usually goes to terminal)
-    echo -e -n "$prompt" >&2
-    
-    if [[ "$INTERACTIVE" == "true" ]]; then
-        # Try to read from /dev/tty if available
-        if [ -r /dev/tty ]; then
-            read -r response </dev/tty 2>/dev/null || response="$default"
-        else
-            # Fallback to reading from stdin
-            read -r response || response="$default"
-        fi
-    else
-        # Non-interactive mode
-        echo " (non-interactive, using default: $default)" >&2
-        response="$default"
-    fi
-    
-    # If empty response, use default
-    if [[ -z "$response" ]]; then
-        response="$default"
-    fi
-    
-    echo "$response"
-}
+# Function removed - no longer prompting for user input
 
 # Check if running as root
 check_root() {
@@ -220,29 +186,22 @@ install_upf() {
     fi
 }
 
-# Check and enable IP forwarding
+# Enable IP forwarding (required for port forwarding to work)
 setup_ip_forwarding() {
-    print_info "Checking IP forwarding configuration..."
+    print_info "Configuring IP forwarding..."
     
     current_forwarding=$(sysctl -n net.ipv4.ip_forward 2>/dev/null || echo "0")
     
     if [[ "$current_forwarding" != "1" ]]; then
-        print_warning "IP forwarding is currently disabled"
-        response=$(read_user_input "  Enable IP forwarding? (recommended) [y/N]: " "n")
+        # Enable immediately
+        sysctl -w net.ipv4.ip_forward=1 >/dev/null 2>&1
         
-        if [[ "$response" =~ ^[Yy]$ ]]; then
-            # Enable immediately
-            sysctl -w net.ipv4.ip_forward=1 >/dev/null 2>&1
-            
-            # Make persistent
-            if ! grep -q "^net.ipv4.ip_forward=1" /etc/sysctl.conf 2>/dev/null; then
-                echo "net.ipv4.ip_forward=1" >> /etc/sysctl.conf
-            fi
-            
-            print_success "IP forwarding enabled and made persistent"
-        else
-            print_warning "IP forwarding not enabled (UPF will enable it when adding rules)"
+        # Make persistent
+        if ! grep -q "^net.ipv4.ip_forward=1" /etc/sysctl.conf 2>/dev/null; then
+            echo "net.ipv4.ip_forward=1" >> /etc/sysctl.conf
         fi
+        
+        print_success "IP forwarding enabled and made persistent"
     else
         print_success "IP forwarding is already enabled"
     fi
@@ -251,28 +210,21 @@ setup_ip_forwarding() {
 # Apply existing rules
 apply_existing_rules() {
     if [[ -s "$CONFIG_DIR/rules.conf" ]]; then
-        print_info "Found existing port forwarding rules"
-        response=$(read_user_input "  Apply existing rules now? [y/N]: " "n")
-        
-        if [[ "$response" =~ ^[Yy]$ ]]; then
-            print_info "Applying existing rules..."
-            if $INSTALL_DIR/$CORE_SCRIPT apply; then
-                print_success "Existing rules applied successfully"
-            else
-                print_warning "Failed to apply some rules"
-            fi
+        print_info "Found existing port forwarding rules, applying them..."
+        if $INSTALL_DIR/$CORE_SCRIPT apply; then
+            print_success "Existing rules applied successfully"
+        else
+            print_warning "Failed to apply some rules (they may already be active)"
         fi
     fi
 }
 
-# Create systemd service for automatic rule application (optional)
+# Create systemd service for automatic rule application
 setup_systemd_service() {
     if command -v systemctl &> /dev/null; then
-        print_info "Systemd detected"
-        response=$(read_user_input "  Create systemd service for automatic rule application at boot? [y/N]: " "n")
+        print_info "Setting up systemd service for automatic rule restoration on boot..."
         
-        if [[ "$response" =~ ^[Yy]$ ]]; then
-            cat > /etc/systemd/system/upf.service << 'EOF'
+        cat > /etc/systemd/system/upf.service << 'EOF'
 [Unit]
 Description=UPF - Uncomplicated Port Forwarding
 After=network.target
@@ -285,12 +237,14 @@ RemainAfterExit=yes
 [Install]
 WantedBy=multi-user.target
 EOF
-            
-            systemctl daemon-reload
-            systemctl enable upf.service
-            print_success "Systemd service created and enabled"
-            print_info "Rules will be automatically applied on system boot"
-        fi
+        
+        systemctl daemon-reload
+        systemctl enable upf.service >/dev/null 2>&1
+        print_success "Systemd service created and enabled"
+        print_info "Rules will be automatically applied on system boot"
+    else
+        print_warning "Systemd not detected - automatic rule restoration not configured"
+        print_info "You'll need to run 'upf apply' manually after reboots"
     fi
 }
 
