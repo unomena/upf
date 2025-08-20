@@ -41,25 +41,25 @@ upf help
 
 ## Usage
 
-All UPF commands require root privileges. Use `sudo` when running commands.
+UPF automatically handles root privileges, so you don't need to use `sudo`.
 
 ### Basic Commands
 
 ```bash
 # List all port forwarding rules
-sudo upf list
+upf list
 
 # Add a new port forwarding rule
-sudo upf add <from_port> <destination>
+upf add <from_port> <destination>
 
 # Remove a port forwarding rule
-sudo upf remove <port>
+upf remove <port>
 
 # Apply all saved rules (useful after reboot)
-sudo upf apply
+upf apply
 
 # Remove all UPF rules
-sudo upf clean
+upf clean
 
 # Show help
 upf help
@@ -73,10 +73,10 @@ Forward incoming traffic on port 8080 to an internal server:
 
 ```bash
 # Forward port 8080 to 192.168.1.30 on port 80
-sudo upf add 8080 192.168.1.30:80
+upf add 8080 192.168.1.30:80
 
 # Forward HTTPS traffic to internal server
-sudo upf add 443 10.0.0.5:443
+upf add 443 10.0.0.5:443
 ```
 
 #### Local Port Forwarding
@@ -85,26 +85,26 @@ Forward traffic between ports on the same machine:
 
 ```bash
 # Forward port 8080 to local port 80
-sudo upf add 8080 80
+upf add 8080 80
 
 # Useful for development - forward port 3000 to 3001
-sudo upf add 3000 3001
+upf add 3000 3001
 ```
 
 #### Managing Rules
 
 ```bash
 # View all configured rules and their status
-sudo upf list
+upf list
 
 # Remove a specific forwarding rule
-sudo upf remove 8080
+upf remove 8080
 
 # Apply all saved rules (after system restart)
-sudo upf apply
+upf apply
 
 # Remove all port forwarding rules
-sudo upf clean
+upf clean
 ```
 
 ### Destination Formats
@@ -147,11 +147,11 @@ UPF manages iptables rules by:
 
 ### Rules Not Working After Reboot
 
-Run `sudo upf apply` to restore all saved rules. Consider adding this to your system startup scripts.
+Run `upf apply` to restore all saved rules. The installer can set up a systemd service to do this automatically.
 
 ### Port Already in Use
 
-If you get an error about a port already being in use, check existing rules with `sudo upf list` and remove conflicting rules.
+If you get an error about a port already being in use, check existing rules with `upf list` and remove conflicting rules.
 
 ### IP Forwarding Not Working
 
@@ -183,18 +183,18 @@ To test changes locally:
 
 ```bash
 # Run directly from the repository
-sudo ./upf list
+./upf list
 
 # Test adding rules
-sudo ./upf add 8080 80
+./upf add 8080 80
 
-# Verify iptables rules
+# Verify iptables rules (requires sudo)
 sudo iptables -t nat -L PREROUTING -n -v --line-numbers
 ```
 
 ## Security Considerations
 
-- UPF requires root privileges to modify iptables rules
+- UPF automatically uses sudo when needed to modify iptables rules
 - Port forwarding can expose internal services - use with caution
 - Always verify the destination before creating rules
 - Consider using firewall rules to restrict source IPs for sensitive services

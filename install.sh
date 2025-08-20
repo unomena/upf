@@ -20,7 +20,8 @@ NC='\033[0m' # No Color
 # Installation paths
 INSTALL_DIR="/usr/local/bin"
 CONFIG_DIR="/etc/upf"
-SCRIPT_NAME="upf"
+WRAPPER_SCRIPT="upf"
+CORE_SCRIPT="upf-core"
 
 # Check if we have access to terminal for interactive input
 INTERACTIVE=true
@@ -144,31 +145,41 @@ create_config_dir() {
     fi
 }
 
-# Install the UPF script
+# Install the UPF scripts
 install_upf() {
     print_info "Installing UPF..."
     
-    # Check if script exists in current directory
-    if [[ -f "./$SCRIPT_NAME" ]]; then
-        # Local installation - script found in current directory
-        print_info "Found UPF script in current directory"
+    # Check if scripts exist in current directory
+    local need_download=false
+    if [[ -f "./$WRAPPER_SCRIPT" && -f "./$CORE_SCRIPT" ]]; then
+        # Local installation - scripts found in current directory
+        print_info "Found UPF scripts in current directory"
     else
+        need_download=true
         # Remote installation - download from GitHub
-        print_info "Downloading UPF script from GitHub..."
+        print_info "Downloading UPF scripts from GitHub..."
         
         # Create temp directory for download
         local temp_dir=$(mktemp -d)
         trap "rm -rf $temp_dir" RETURN
         
-        # Download the script
+        # Download both scripts
         if command -v curl &> /dev/null; then
-            if ! curl -fsSL "https://raw.githubusercontent.com/unomena/upf/main/$SCRIPT_NAME" -o "$temp_dir/$SCRIPT_NAME"; then
-                print_error "Failed to download UPF script from GitHub"
+            if ! curl -fsSL "https://raw.githubusercontent.com/unomena/upf/main/$WRAPPER_SCRIPT" -o "$temp_dir/$WRAPPER_SCRIPT"; then
+                print_error "Failed to download UPF wrapper script from GitHub"
+                exit 1
+            fi
+            if ! curl -fsSL "https://raw.githubusercontent.com/unomena/upf/main/$CORE_SCRIPT" -o "$temp_dir/$CORE_SCRIPT"; then
+                print_error "Failed to download UPF core script from GitHub"
                 exit 1
             fi
         elif command -v wget &> /dev/null; then
-            if ! wget -q "https://raw.githubusercontent.com/unomena/upf/main/$SCRIPT_NAME" -O "$temp_dir/$SCRIPT_NAME"; then
-                print_error "Failed to download UPF script from GitHub"
+            if ! wget -q "https://raw.githubusercontent.com/unomena/upf/main/$WRAPPER_SCRIPT" -O "$temp_dir/$WRAPPER_SCRIPT"; then
+                print_error "Failed to download UPF wrapper script from GitHub"
+                exit 1
+            fi
+            if ! wget -q "https://raw.githubusercontent.com/unomena/upf/main/$CORE_SCRIPT" -O "$temp_dir/$CORE_SCRIPT"; then
+                print_error "Failed to download UPF core script from GitHub"
                 exit 1
             fi
         else
@@ -176,27 +187,36 @@ install_upf() {
             exit 1
         fi
         
-        # Use the downloaded script
-        cp "$temp_dir/$SCRIPT_NAME" "./$SCRIPT_NAME"
-        print_success "Downloaded UPF script from GitHub"
+        # Use the downloaded scripts
+        cp "$temp_dir/$WRAPPER_SCRIPT" "./$WRAPPER_SCRIPT"
+        cp "$temp_dir/$CORE_SCRIPT" "./$CORE_SCRIPT"
+        print_success "Downloaded UPF scripts from GitHub"
     fi
     
     # Backup existing installation if present
-    if [[ -f "$INSTALL_DIR/$SCRIPT_NAME" ]]; then
+    if [[ -f "$INSTALL_DIR/$WRAPPER_SCRIPT" ]]; then
         print_warning "Existing installation found"
-        backup_file="$INSTALL_DIR/${SCRIPT_NAME}.backup.$(date +%Y%m%d_%H%M%S)"
-        cp "$INSTALL_DIR/$SCRIPT_NAME" "$backup_file"
+        backup_file="$INSTALL_DIR/${WRAPPER_SCRIPT}.backup.$(date +%Y%m%d_%H%M%S)"
+        cp "$INSTALL_DIR/$WRAPPER_SCRIPT" "$backup_file"
+        print_success "Created backup: $backup_file"
+    fi
+    if [[ -f "$INSTALL_DIR/$CORE_SCRIPT" ]]; then
+        backup_file="$INSTALL_DIR/${CORE_SCRIPT}.backup.$(date +%Y%m%d_%H%M%S)"
+        cp "$INSTALL_DIR/$CORE_SCRIPT" "$backup_file"
         print_success "Created backup: $backup_file"
     fi
     
-    # Copy script to installation directory
-    cp "./$SCRIPT_NAME" "$INSTALL_DIR/$SCRIPT_NAME"
-    chmod +x "$INSTALL_DIR/$SCRIPT_NAME"
-    print_success "Installed UPF to $INSTALL_DIR/$SCRIPT_NAME"
+    # Copy scripts to installation directory
+    cp "./$WRAPPER_SCRIPT" "$INSTALL_DIR/$WRAPPER_SCRIPT"
+    cp "./$CORE_SCRIPT" "$INSTALL_DIR/$CORE_SCRIPT"
+    chmod +x "$INSTALL_DIR/$WRAPPER_SCRIPT"
+    chmod +x "$INSTALL_DIR/$CORE_SCRIPT"
+    print_success "Installed UPF wrapper to $INSTALL_DIR/$WRAPPER_SCRIPT"
+    print_success "Installed UPF core to $INSTALL_DIR/$CORE_SCRIPT"
     
-    # Clean up downloaded script if it was fetched
-    if [[ ! -f "./$SCRIPT_NAME.original" ]]; then
-        rm -f "./$SCRIPT_NAME"
+    # Clean up downloaded scripts if they were fetched
+    if [[ "$need_download" == "true" ]]; then
+        rm -f "./$WRAPPER_SCRIPT" "./$CORE_SCRIPT"
     fi
 }
 
@@ -236,7 +256,7 @@ apply_existing_rules() {
         
         if [[ "$response" =~ ^[Yy]$ ]]; then
             print_info "Applying existing rules..."
-            if $INSTALL_DIR/$SCRIPT_NAME apply; then
+            if $INSTALL_DIR/$CORE_SCRIPT apply; then
                 print_success "Existing rules applied successfully"
             else
                 print_warning "Failed to apply some rules"
@@ -259,7 +279,7 @@ After=network.target
 
 [Service]
 Type=oneshot
-ExecStart=/usr/local/bin/upf apply
+ExecStart=/usr/local/bin/upf-core apply
 RemainAfterExit=yes
 
 [Install]
@@ -278,11 +298,11 @@ EOF
 verify_installation() {
     print_info "Verifying installation..."
     
-    if [[ -x "$INSTALL_DIR/$SCRIPT_NAME" ]]; then
+    if [[ -x "$INSTALL_DIR/$WRAPPER_SCRIPT" && -x "$INSTALL_DIR/$CORE_SCRIPT" ]]; then
         print_success "UPF is installed and executable"
         
-        # Test if it runs
-        if $INSTALL_DIR/$SCRIPT_NAME help &> /dev/null; then
+        # Test if it runs (wrapper will handle sudo)
+        if $INSTALL_DIR/$WRAPPER_SCRIPT help &> /dev/null; then
             print_success "UPF is working correctly"
         else
             print_warning "UPF installed but may have issues"
@@ -306,16 +326,17 @@ show_completion_message() {
     echo -e "     ${BOLD}upf help${NC}"
     echo ""
     echo "  2. Add a port forwarding rule:"
-    echo -e "     ${BOLD}sudo upf add 8080 192.168.1.100:80${NC}"
+    echo -e "     ${BOLD}upf add 8080 192.168.1.100:80${NC}"
     echo ""
     echo "  3. List all rules:"
-    echo -e "     ${BOLD}sudo upf list${NC}"
+    echo -e "     ${BOLD}upf list${NC}"
     echo ""
     echo "  4. Remove a rule:"
-    echo -e "     ${BOLD}sudo upf remove 8080${NC}"
+    echo -e "     ${BOLD}upf remove 8080${NC}"
     echo ""
     echo "Configuration:"
-    echo "  • Installed to: $INSTALL_DIR/$SCRIPT_NAME"
+    echo "  • Installed to: $INSTALL_DIR/$WRAPPER_SCRIPT"
+    echo "  • Core script: $INSTALL_DIR/$CORE_SCRIPT"
     echo "  • Config directory: $CONFIG_DIR"
     echo "  • Rules file: $CONFIG_DIR/rules.conf"
     echo ""
