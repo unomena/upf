@@ -3,7 +3,7 @@
 #############################################################################
 # UPF Quick Installer
 # 
-# Downloads and runs the installation script from GitHub.
+# Downloads the full repository and runs the installation script.
 # Usage: curl -fsSL https://raw.githubusercontent.com/unomena/upf/main/get.sh | bash
 #        or
 #        wget -qO- https://raw.githubusercontent.com/unomena/upf/main/get.sh | bash

@@ -111,10 +111,36 @@ install_upf() {
     print_info "Installing UPF..."
     
     # Check if script exists in current directory
-    if [[ ! -f "./$SCRIPT_NAME" ]]; then
-        print_error "UPF script not found in current directory"
-        echo "  Please run this installer from the UPF directory"
-        exit 1
+    if [[ -f "./$SCRIPT_NAME" ]]; then
+        # Local installation - script found in current directory
+        print_info "Found UPF script in current directory"
+    else
+        # Remote installation - download from GitHub
+        print_info "Downloading UPF script from GitHub..."
+        
+        # Create temp directory for download
+        local temp_dir=$(mktemp -d)
+        trap "rm -rf $temp_dir" RETURN
+        
+        # Download the script
+        if command -v curl &> /dev/null; then
+            if ! curl -fsSL "https://raw.githubusercontent.com/unomena/upf/main/$SCRIPT_NAME" -o "$temp_dir/$SCRIPT_NAME"; then
+                print_error "Failed to download UPF script from GitHub"
+                exit 1
+            fi
+        elif command -v wget &> /dev/null; then
+            if ! wget -q "https://raw.githubusercontent.com/unomena/upf/main/$SCRIPT_NAME" -O "$temp_dir/$SCRIPT_NAME"; then
+                print_error "Failed to download UPF script from GitHub"
+                exit 1
+            fi
+        else
+            print_error "Neither curl nor wget is available for downloading"
+            exit 1
+        fi
+        
+        # Use the downloaded script
+        cp "$temp_dir/$SCRIPT_NAME" "./$SCRIPT_NAME"
+        print_success "Downloaded UPF script from GitHub"
     fi
     
     # Backup existing installation if present
@@ -129,6 +155,11 @@ install_upf() {
     cp "./$SCRIPT_NAME" "$INSTALL_DIR/$SCRIPT_NAME"
     chmod +x "$INSTALL_DIR/$SCRIPT_NAME"
     print_success "Installed UPF to $INSTALL_DIR/$SCRIPT_NAME"
+    
+    # Clean up downloaded script if it was fetched
+    if [[ ! -f "./$SCRIPT_NAME.original" ]]; then
+        rm -f "./$SCRIPT_NAME"
+    fi
 }
 
 # Check and enable IP forwarding

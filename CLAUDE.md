@@ -45,13 +45,22 @@ sudo ./upf list
 sudo ./upf list --json
 sudo ./upf add 8080 80
 sudo ./upf remove 8080
+sudo ./upf apply  # Re-apply all saved rules
+sudo ./upf clean  # Remove all UPF-managed rules
 
 # Verify iptables rules
 sudo iptables -t nat -L PREROUTING -n -v --line-numbers
 sudo iptables -L FORWARD -n -v --line-numbers
+sudo iptables -t nat -L OUTPUT -n -v --line-numbers  # For localhost rules
 
 # Test JSON output parsing
 sudo ./upf list --json | jq '.rules'
+
+# Check configuration file
+cat /etc/upf/rules.conf
+
+# Validate bash syntax without execution
+bash -n upf
 ```
 
 ### Installation
@@ -86,3 +95,31 @@ The installer can create a systemd service for automatic rule restoration:
 - The `apply` command re-adds all saved rules, useful for system restarts
 - JSON output format: `{"rules": [{"local_port": N, "destination_ip": "IP", "destination_port": N, "status": "active|inactive"}]}`
 - Repository URL references should use `unomena/upf` on GitHub
+- The script uses bash-specific features and requires bash 4.0+
+- All iptables rules are tagged with comments for safe cleanup (won't affect non-UPF rules)
+
+## Code Modification Guidelines
+
+When modifying the `upf` script:
+- Maintain POSIX shell compatibility where possible, but bash-specific features are acceptable
+- Always use the `IPTABLES_COMMENT_PREFIX` for rule tagging
+- Preserve the configuration file format for backward compatibility
+- Ensure all error messages are descriptive and include suggested fixes
+- Test both interactive and silent modes (when called internally)
+- Validate all user input before passing to iptables commands
+
+## Debugging
+
+```bash
+# Enable bash debug mode
+sudo bash -x upf list
+
+# Check iptables rules with UPF tags
+sudo iptables-save | grep UPF
+
+# Monitor syslog for iptables messages
+sudo journalctl -f -u systemd-networkd
+
+# Test specific functions in isolation
+source upf && parse_destination "localhost"
+```
