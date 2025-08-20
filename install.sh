@@ -61,10 +61,12 @@ read_user_input() {
     local response=""
     
     if [[ "$INTERACTIVE" == "true" ]]; then
-        echo -n "$prompt"
         if [ -e /dev/tty ]; then
+            # When piped, write prompt to /dev/tty so user can see it
+            echo -n "$prompt" >/dev/tty
             read -r response </dev/tty
         else
+            echo -n "$prompt"
             read -r response
         fi
     else
@@ -297,16 +299,16 @@ show_completion_message() {
     echo "Quick Start Guide:"
     echo ""
     echo "  1. View help and available commands:"
-    echo "     ${BOLD}upf help${NC}"
+    echo -e "     ${BOLD}upf help${NC}"
     echo ""
     echo "  2. Add a port forwarding rule:"
-    echo "     ${BOLD}sudo upf add 8080 192.168.1.100:80${NC}"
+    echo -e "     ${BOLD}sudo upf add 8080 192.168.1.100:80${NC}"
     echo ""
     echo "  3. List all rules:"
-    echo "     ${BOLD}sudo upf list${NC}"
+    echo -e "     ${BOLD}sudo upf list${NC}"
     echo ""
     echo "  4. Remove a rule:"
-    echo "     ${BOLD}sudo upf remove 8080${NC}"
+    echo -e "     ${BOLD}sudo upf remove 8080${NC}"
     echo ""
     echo "Configuration:"
     echo "  • Installed to: $INSTALL_DIR/$SCRIPT_NAME"
@@ -322,7 +324,7 @@ show_completion_message() {
     fi
     
     echo "For more information:"
-    echo "  • Run: ${BOLD}upf help${NC}"
+    echo -e "  • Run: ${BOLD}upf help${NC}"
     echo "  • Visit: https://github.com/unomena/upf"
     echo ""
 }
