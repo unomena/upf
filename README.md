@@ -21,7 +21,11 @@ UPF (Uncomplicated Port Forwarding) is a simple, user-friendly command-line tool
 ### Quick Install
 
 ```bash
+# Standard installation
 curl -fsSL https://raw.githubusercontent.com/unomena/upf/main/install.sh | sudo bash
+
+# If you're having issues with cached versions, use:
+curl -fsSL "https://raw.githubusercontent.com/unomena/upf/main/install.sh?$(date +%s)" | sudo bash
 ```
 
 ### Manual Install
